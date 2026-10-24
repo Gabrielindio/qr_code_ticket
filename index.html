@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Validador de Tickets</title>
+<style>
+  :root { --bg:#111; --fg:#fff; --card:#222; --ok:#1b8a3a; --warn:#c77700; --bad:#c62828; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,sans-serif; background:var(--bg); color:var(--fg); }
+  main { max-width:520px; margin:0 auto; padding:16px; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  .sub { opacity:.7; font-size:14px; margin-bottom:12px; }
+  .video-box { position:relative; background:#000; border-radius:12px; overflow:hidden; aspect-ratio:1; }
+  video { width:100%; height:100%; object-fit:cover; }
+  .mira { position:absolute; inset:18%; border:3px solid rgba(255,255,255,.8); border-radius:12px; }
+  button { font:inherit; font-size:17px; padding:12px 16px; border:0; border-radius:10px; background:#3a3a3a; color:var(--fg); }
+  button.primary { background:#fff; color:#000; font-weight:700; }
+  button:disabled { opacity:.5; }
+  .row { display:flex; gap:8px; margin-top:12px; }
+  input { font:inherit; font-size:17px; padding:12px; border-radius:10px; border:0; width:100%; }
+  .row input { flex:1; text-transform:uppercase; }
+  form { display:flex; flex-direction:column; gap:10px; }
+  .stats { display:flex; gap:8px; margin-top:12px; }
+  .stat { flex:1; background:var(--card); border-radius:10px; padding:10px; text-align:center; }
+  .stat b { display:block; font-size:26px; }
+  details { margin-top:12px; background:var(--card); border-radius:10px; padding:10px 12px; }
+  details ul { padding-left:18px; max-height:260px; overflow:auto; font-size:14px; }
+  details li { margin:6px 0; }
+  button.desfazer { font-size:13px; padding:4px 10px; margin-left:4px; background:var(--warn); }
+  .erro { background:var(--bad); padding:12px; border-radius:10px; }
+  .topo { display:flex; justify-content:space-between; align-items:center; gap:8px; font-size:13px; opacity:.8; margin-top:16px; }
+  .topo button { font-size:13px; padding:6px 10px; }
+  #resultado { position:fixed; inset:0; display:none; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding:24px; gap:14px; }
+  #resultado.show { display:flex; }
+  #resultado .icone { font-size:90px; line-height:1; }
+  #resultado .titulo { font-size:40px; font-weight:800; }
+  #resultado .detalhe { font-size:20px; }
+  #resultado button { min-width:220px; font-size:20px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Validador · Macarrão na Chapa</h1>
+
+  <section id="telaLogin" hidden>
+    <div class="sub">Entre com o usuário de operador criado no Supabase.</div>
+    <form id="formLogin">
+      <input id="email" type="email" placeholder="E-mail" autocomplete="username" required>
+      <input id="senha" type="password" placeholder="Senha" autocomplete="current-password" required>
+      <button class="primary" id="btnEntrar">Entrar</button>
+      <div id="erroLogin" class="erro" hidden></div>
+    </form>
+  </section>
+
+  <section id="telaValidador" hidden>
+    <div class="sub">Aponte a câmera para o QR Code do ticket.</div>
+    <div class="video-box"><video id="video" playsinline muted></video><div class="mira"></div></div>
+    <div class="row"><button class="primary" id="btnCamera" style="flex:1">Ligar câmera</button></div>
+
+    <div class="row">
+      <input id="manual" placeholder="Digitar: MAC-007.ABCDEFGHIJ" autocomplete="off">
+      <button id="btnManual">OK</button>
+    </div>
+
+    <div class="stats">
+      <div class="stat"><b id="nEntregues">–</b>entregues</div>
+      <div class="stat"><b id="nTotal">–</b>tickets</div>
+      <div class="stat"><b id="nSuspeitas">–</b>suspeitas</div>
+    </div>
+
+    <details>
+      <summary>Histórico de leituras (toque para desfazer uma entrega)</summary>
+      <ul id="lista"></ul>
+    </details>
+
+    <div class="topo"><span id="usuario"></span><button id="btnSair">Sair</button></div>
+  </section>
+</main>
+
+<div id="resultado">
+  <div class="icone" id="rIcone"></div>
+  <div class="titulo" id="rTitulo"></div>
+  <div class="detalhe" id="rDetalhe"></div>
+  <button class="primary" id="btnProximo">Próximo</button>
+  <button id="btnDesfazer" hidden>Desfazer (não entreguei)</button>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+<script>
+// Supabase > Project Settings > API. A chave "anon"/"publishable" pode ficar pública:
+// sem login de operador ela não consegue ler nem alterar nada.
+const SUPABASE_URL = "https://hwqmlojlwbetkdnxihsb.supabase.co";
+const SUPABASE_KEY = "sb_publishable_JmzrqfcWD122QmkvNCxDBQ_BiGRU6K-";
+
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+const $ = id => document.getElementById(id);
+const hora = iso => new Date(iso).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+let pausado = false, ultimoValido = null, ocupado = false;
+
+// ---------- Login ----------
+async function mostrarTela() {
+  const { data: { session } } = await sb.auth.getSession();
+  $("telaLogin").hidden = !!session;
+  $("telaValidador").hidden = !session;
+  if (session) { $("usuario").textContent = session.user.email; atualizarPainel(); }
+}
+
+$("formLogin").onsubmit = async e => {
+  e.preventDefault();
+  $("btnEntrar").disabled = true; $("erroLogin").hidden = true;
+  const { error } = await sb.auth.signInWithPassword({ email: $("email").value.trim(), password: $("senha").value });
+  $("btnEntrar").disabled = false;
+  if (error) { $("erroLogin").textContent = "Não foi possível entrar: " + error.message; $("erroLogin").hidden = false; return; }
+  mostrarTela();
+};
+$("btnSair").onclick = async () => { await sb.auth.signOut(); location.reload(); };
+
+// ---------- Resultado ----------
+function mostrar(tipo, titulo, detalhe, podeDesfazer) {
+  const cores = { ok: "var(--ok)", usado: "var(--warn)", invalido: "var(--bad)" };
+  const icones = { ok: "✅", usado: "⚠️", invalido: "❌" };
+  $("resultado").style.background = cores[tipo];
+  $("rIcone").textContent = icones[tipo];
+  $("rTitulo").textContent = titulo;
+  $("rDetalhe").textContent = detalhe;
+  $("btnDesfazer").hidden = !podeDesfazer;
+  $("resultado").classList.add("show");
+  pausado = true;
+  if (navigator.vibrate) navigator.vibrate(tipo === "ok" ? 120 : [200, 100, 200]);
+}
+
+async function validar(texto) {
+  if (ocupado) return;
+  ocupado = true; pausado = true;
+  const { data, error } = await sb.rpc("validar_ticket", { p_codigo: texto });
+  ocupado = false;
+
+  if (error) {
+    const msg = error.code === "42501" ? "Este usuário não está na tabela de operadores." : "Sem conexão com o servidor. Use a lista de controle em papel.";
+    mostrar("invalido", "ERRO", msg);
+  } else if (data.resultado === "valido") {
+    ultimoValido = data.ticket;
+    mostrar("ok", "VÁLIDO", `${data.ticket} · pode entregar`, true);
+  } else if (data.resultado === "ja_usado") {
+    mostrar("usado", "JÁ USADO", `${data.ticket} foi entregue às ${hora(data.usado_em)} por ${data.usado_por}. Provável cópia.`);
+  } else {
+    mostrar("invalido", "TICKET FALSO", "Código não reconhecido. Não entregue.");
+  }
+  atualizarPainel();
+}
+
+$("btnProximo").onclick = () => { $("resultado").classList.remove("show"); ultimoValido = null; setTimeout(() => pausado = false, 600); };
+$("btnDesfazer").onclick = async () => {
+  if (ultimoValido) await sb.rpc("desfazer_entrega", { p_ticket: ultimoValido });
+  $("btnProximo").onclick();
+  atualizarPainel();
+};
+$("btnManual").onclick = () => { const v = $("manual").value; $("manual").value = ""; if (v.trim()) validar(v); };
+$("manual").onkeydown = e => { if (e.key === "Enter") $("btnManual").onclick(); };
+
+// ---------- Painel ----------
+async function atualizarPainel() {
+  const { data, error } = await sb.rpc("painel");
+  if (error) return;
+  $("nEntregues").textContent = data.entregues;
+  $("nTotal").textContent = data.total;
+  $("nSuspeitas").textContent = data.suspeitas;
+  const nomes = { valido: "✅ entregue", ja_usado: "⚠️ já usado", invalido: "❌ falso", desfeito: "↩️ desfeito" };
+  // O histórico vem do mais novo para o mais antigo: só a entrega mais recente de cada ticket pode ser desfeita
+  const vistos = new Set();
+  $("lista").replaceChildren(...data.historico.map(h => {
+    const li = document.createElement("li");
+    li.textContent = `${hora(h.criado_em)} · ${h.ticket_id || h.codigo_lido} · ${nomes[h.resultado]} · ${h.operador}`;
+    const mudaEntrega = h.resultado === "valido" || h.resultado === "desfeito";
+    const maisRecente = mudaEntrega && !vistos.has(h.ticket_id);
+    if (mudaEntrega) vistos.add(h.ticket_id);
+    if (maisRecente && h.resultado === "valido") {
+      const btn = document.createElement("button");
+      btn.className = "desfazer";
+      btn.textContent = "Desfazer";
+      btn.onclick = () => desfazer(h.ticket_id);
+      li.append(" ", btn);
+    }
+    return li;
+  }));
+}
+
+async function desfazer(ticket) {
+  if (!confirm(`Desfazer a entrega do ${ticket}? Ele volta a valer.`)) return;
+  const { data, error } = await sb.rpc("desfazer_entrega", { p_ticket: ticket });
+  if (error || !data.ok) alert("Não foi possível desfazer: " + (error ? error.message : "o ticket já não estava entregue."));
+  atualizarPainel();
+}
+setInterval(() => { if (!$("telaValidador").hidden) atualizarPainel(); }, 15000);
+
+// ---------- Câmera: leitor nativo quando existe, senão jsQR ----------
+async function ligarCamera() {
+  if (!window.isSecureContext || !navigator.mediaDevices) {
+    alert("A câmera só funciona com a página aberta via https://. Use o campo de digitar enquanto isso.");
+    return;
+  }
+  const video = $("video");
+  try {
+    video.srcObject = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+  } catch (e) { alert("Não foi possível abrir a câmera: " + e.message); return; }
+  await video.play();
+  $("btnCamera").hidden = true;
+
+  const detector = "BarcodeDetector" in window ? new BarcodeDetector({ formats: ["qr_code"] }) : null;
+  const canvas = document.createElement("canvas"), ctx = canvas.getContext("2d", { willReadFrequently: true });
+
+  async function quadro() {
+    if (!pausado && video.readyState >= 2) {
+      let texto = null;
+      try {
+        if (detector) {
+          const r = await detector.detect(video);
+          if (r.length) texto = r[0].rawValue;
+        } else {
+          canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+          ctx.drawImage(video, 0, 0);
+          const r = jsQR(ctx.getImageData(0, 0, canvas.width, canvas.height).data, canvas.width, canvas.height, { inversionAttempts: "dontInvert" });
+          if (r) texto = r.data;
+        }
+      } catch {}
+      if (texto) await validar(texto);
+    }
+    setTimeout(quadro, 150);
+  }
+  quadro();
+}
+$("btnCamera").onclick = ligarCamera;
+
+mostrarTela();
+</script>
+</body>
+</html>
